@@ -1,0 +1,25 @@
+--create table Product(id Serial Primary key, Name varchar(50),ed varchar(20));
+--create table Client(id Serial Primary key, Name varchar(50),Adress varchar(50),Phone varchar(50));
+--create table Futura(id Serial Primary key,Foreign key (id) References Client(id),Data_ date,TotalSum float);
+--create table FuturaInfo(id Serial Primary key,Foreign key (id) References Futura(id),Foreign key (id) References Product(id),Quantity integer,Price float);
+CREATE OR REPLACE FUNCTION insert_futura_info() RETURNS TRIGGER AS $ad_fi_trigger$
+BEGIN
+UPDATE futura SET totalsum=totalsum+NEW.quantity*New.price
+where futura.id=NEW.IDFutura;
+RETURN NULL;
+END
+$ad_fi_trigger$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION delete_futura_info() RETURNS TRIGGER AS $del_fi_trigger$
+begin
+update future SET totalsum=totalsum-OLD.quantity*OLD.price
+where futura.id=OLD.IDFutura;
+return null;
+end
+$del_fi_trigger$ LANGUAGE plpgsql;
+
+CREATE TRIGGER ins_futura_info AFTER INSERT ON FuturaInfo
+FOR EACH ROW EXECUTE PROCEDURE insert_futura_info();
+
+CREATE TRIGGER del_futura_info AFTER DELETE ON FuturaInfo
+FOR EACH ROW EXECUTE PROCEDURE delete_futura_info();
