@@ -1,0 +1,50 @@
+CREATE TABLE Client
+(
+    id SERIAL PRIMARY KEY,
+    fullname VARCHAR(100) NOT NULL,
+    phone VARCHAR(50),
+    address VARCHAR(200)
+);CREATE TABLE CustomerOrder
+(
+    id SERIAL PRIMARY KEY,
+    id_client INTEGER NOT NULL REFERENCES Client(id),
+    order_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    total_sum NUMERIC(12,2) DEFAULT 0,
+    is_paid BOOLEAN DEFAULT FALSE,
+    is_delivered BOOLEAN DEFAULT FALSE
+);CREATE TABLE CustomerOrderInfo
+(
+    id SERIAL PRIMARY KEY,
+    id_order INTEGER NOT NULL REFERENCES CustomerOrder(id) ON DELETE CASCADE,
+    id_product INTEGER NOT NULL REFERENCES Product(id),
+    quantity INTEGER NOT NULL,
+    price NUMERIC(12,2) NOT NULL
+);CREATE OR REPLACE FUNCTION update_order_sum()
+RETURNS TRIGGER AS
+$$
+BEGIN
+    UPDATE CustomerOrder
+    SET total_sum =
+    (
+        SELECT COALESCE(SUM(quantity * price),0)
+        FROM CustomerOrderInfo
+        WHERE id_order = NEW.id_order
+    )
+    WHERE id = NEW.id_order;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;CREATE TRIGGER trg_update_order_sum
+AFTER INSERT OR UPDATE OR DELETE
+ON CustomerOrderInfo
+FOR EACH ROW
+EXECUTE FUNCTION update_order_sum();SELECT
+    p.id,
+    p.name,
+    COALESCE(SUM(iii.quantity),0) - COALESCE(SUM(ooo.quantity),0) AS stock
+FROM Product p
+LEFT JOIN InvoiceInInfo iii
+       ON iii.id_product = p.id
+LEFT JOIN InvoiceOutInfo ooo
+       ON ooo.id_product = p.id
+GROUP BY p.id, p.name;
