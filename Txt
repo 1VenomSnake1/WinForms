@@ -1,0 +1,378 @@
+-- =========================================
+-- БАЗА ДАННЫХ ДЛЯ МАГАЗИНА АВТОЗАПЧАСТЕЙ
+-- PostgreSQL
+-- =========================================
+
+-- =========================================
+-- УДАЛЕНИЕ ТАБЛИЦ (если существуют)
+-- =========================================
+
+DROP TABLE IF EXISTS payment CASCADE;
+DROP TABLE IF EXISTS invoice_item CASCADE;
+DROP TABLE IF EXISTS invoice CASCADE;
+DROP TABLE IF EXISTS supplier_product CASCADE;
+DROP TABLE IF EXISTS product CASCADE;
+DROP TABLE IF EXISTS supplier CASCADE;
+
+-- =========================================
+-- ТАБЛИЦА ПОСТАВЩИКОВ
+-- =========================================
+
+CREATE TABLE supplier
+(
+    id              SERIAL PRIMARY KEY,
+    name            VARCHAR(100) NOT NULL,
+    address         VARCHAR(200),
+    phone           VARCHAR(30),
+    email           VARCHAR(100)
+);
+
+-- =========================================
+-- ТАБЛИЦА ТОВАРОВ
+-- Цена НЕ хранится в товаре
+-- =========================================
+
+CREATE TABLE product
+(
+    id              SERIAL PRIMARY KEY,
+    name            VARCHAR(100) NOT NULL,
+    unit            VARCHAR(20) NOT NULL,
+    article         VARCHAR(50)
+);
+
+-- =========================================
+-- КАКИЕ ПОСТАВЩИКИ ПОСТАВЛЯЮТ КАКИЕ ТОВАРЫ
+-- =========================================
+
+CREATE TABLE supplier_product
+(
+    id              SERIAL PRIMARY KEY,
+    supplier_id     INTEGER NOT NULL REFERENCES supplier(id) ON DELETE CASCADE,
+    product_id      INTEGER NOT NULL REFERENCES product(id) ON DELETE CASCADE,
+
+    UNIQUE(supplier_id, product_id)
+);
+
+-- =========================================
+-- НАКЛАДНЫЕ
+-- type:
+-- IN  = приходная
+-- OUT = расходная
+-- =========================================
+
+CREATE TABLE invoice
+(
+    id                  SERIAL PRIMARY KEY,
+
+    supplier_id         INTEGER NOT NULL
+                        REFERENCES supplier(id),
+
+    invoice_date        DATE NOT NULL,
+
+    invoice_type        VARCHAR(3) NOT NULL
+                        CHECK(invoice_type IN ('IN', 'OUT')),
+
+    total_sum           NUMERIC(12,2) NOT NULL DEFAULT 0,
+
+    payment_due_date    DATE NOT NULL,
+
+    comment_text        TEXT
+);
+
+-- =========================================
+-- СОДЕРЖИМОЕ НАКЛАДНОЙ
+-- =========================================
+
+CREATE TABLE invoice_item
+(
+    id              SERIAL PRIMARY KEY,
+
+    invoice_id      INTEGER NOT NULL
+                    REFERENCES invoice(id)
+                    ON DELETE CASCADE,
+
+    product_id      INTEGER NOT NULL
+                    REFERENCES product(id),
+
+    quantity        NUMERIC(12,2) NOT NULL
+                    CHECK(quantity > 0),
+
+    price           NUMERIC(12,2) NOT NULL
+                    CHECK(price >= 0)
+);
+
+-- =========================================
+-- ПЛАТЕЖИ ПО НАКЛАДНЫМ
+-- Одна накладная может иметь много платежей
+-- =========================================
+
+CREATE TABLE payment
+(
+    id                  SERIAL PRIMARY KEY,
+
+    invoice_id          INTEGER NOT NULL
+                        REFERENCES invoice(id)
+                        ON DELETE CASCADE,
+
+    payment_date        DATE NOT NULL,
+
+    amount              NUMERIC(12,2) NOT NULL
+                        CHECK(amount > 0)
+);
+
+-- =========================================
+-- ТРИГГЕР:
+-- ДОБАВЛЕНИЕ ПОЗИЦИИ В НАКЛАДНУЮ
+-- =========================================
+
+CREATE OR REPLACE FUNCTION invoice_item_insert()
+RETURNS TRIGGER AS
+$$
+BEGIN
+
+    UPDATE invoice
+    SET total_sum = total_sum + (NEW.quantity * NEW.price)
+    WHERE id = NEW.invoice_id;
+
+    RETURN NEW;
+
+END;
+$$ LANGUAGE plpgsql;
+
+-- =========================================
+-- ТРИГГЕР:
+-- УДАЛЕНИЕ ПОЗИЦИИ ИЗ НАКЛАДНОЙ
+-- =========================================
+
+CREATE OR REPLACE FUNCTION invoice_item_delete()
+RETURNS TRIGGER AS
+$$
+BEGIN
+
+    UPDATE invoice
+    SET total_sum = total_sum - (OLD.quantity * OLD.price)
+    WHERE id = OLD.invoice_id;
+
+    RETURN OLD;
+
+END;
+$$ LANGUAGE plpgsql;
+
+-- =========================================
+-- ТРИГГЕР:
+-- ИЗМЕНЕНИЕ ПОЗИЦИИ НАКЛАДНОЙ
+-- =========================================
+
+CREATE OR REPLACE FUNCTION invoice_item_update()
+RETURNS TRIGGER AS
+$$
+BEGIN
+
+    UPDATE invoice
+    SET total_sum =
+        total_sum
+        - (OLD.quantity * OLD.price)
+        + (NEW.quantity * NEW.price)
+    WHERE id = NEW.invoice_id;
+
+    RETURN NEW;
+
+END;
+$$ LANGUAGE plpgsql;
+
+-- =========================================
+-- СОЗДАНИЕ ТРИГГЕРОВ
+-- =========================================
+
+CREATE TRIGGER trg_invoice_item_insert
+AFTER INSERT
+ON invoice_item
+FOR EACH ROW
+EXECUTE PROCEDURE invoice_item_insert();
+
+CREATE TRIGGER trg_invoice_item_delete
+AFTER DELETE
+ON invoice_item
+FOR EACH ROW
+EXECUTE PROCEDURE invoice_item_delete();
+
+CREATE TRIGGER trg_invoice_item_update
+AFTER UPDATE
+ON invoice_item
+FOR EACH ROW
+EXECUTE PROCEDURE invoice_item_update();
+
+-- =========================================
+-- ПРЕДСТАВЛЕНИЕ:
+-- СУММА ОПЛАТ ПО НАКЛАДНЫМ
+-- =========================================
+
+CREATE OR REPLACE VIEW vw_invoice_payments AS
+SELECT
+    i.id AS invoice_id,
+    i.total_sum,
+    COALESCE(SUM(p.amount), 0) AS paid_sum,
+    i.total_sum - COALESCE(SUM(p.amount), 0) AS debt_sum
+FROM invoice i
+LEFT JOIN payment p
+    ON p.invoice_id = i.id
+GROUP BY i.id, i.total_sum;
+
+-- =========================================
+-- ОТЧЕТ ПО ПОСТАВЩИКАМ
+-- =========================================
+
+CREATE OR REPLACE VIEW vw_supplier_report AS
+SELECT
+    s.id,
+    s.name,
+
+    SUM(i.total_sum) AS received_goods_sum,
+
+    COALESCE(SUM(p.amount), 0) AS paid_sum,
+
+    SUM(i.total_sum) - COALESCE(SUM(p.amount), 0) AS debt_sum,
+
+    SUM(
+        CASE
+            WHEN CURRENT_DATE > i.payment_due_date
+                 AND (i.total_sum - COALESCE(p2.paid,0)) > 0
+            THEN (i.total_sum - COALESCE(p2.paid,0))
+            ELSE 0
+        END
+    ) AS overdue_debt
+
+FROM supplier s
+
+LEFT JOIN invoice i
+    ON i.supplier_id = s.id
+   AND i.invoice_type = 'IN'
+
+LEFT JOIN payment p
+    ON p.invoice_id = i.id
+
+LEFT JOIN
+(
+    SELECT
+        invoice_id,
+        SUM(amount) AS paid
+    FROM payment
+    GROUP BY invoice_id
+) p2
+ON p2.invoice_id = i.id
+
+GROUP BY s.id, s.name;
+
+-- =========================================
+-- ОТЧЕТ ПО ОСТАТКАМ ТОВАРОВ
+-- =========================================
+
+CREATE OR REPLACE VIEW vw_product_stock AS
+SELECT
+    p.id,
+    p.name,
+    p.unit,
+
+    COALESCE(
+        SUM(
+            CASE
+                WHEN i.invoice_type = 'IN'
+                THEN ii.quantity
+                ELSE 0
+            END
+        ),0
+    )
+    -
+    COALESCE(
+        SUM(
+            CASE
+                WHEN i.invoice_type = 'OUT'
+                THEN ii.quantity
+                ELSE 0
+            END
+        ),0
+    ) AS stock_quantity
+
+FROM product p
+
+LEFT JOIN invoice_item ii
+    ON ii.product_id = p.id
+
+LEFT JOIN invoice i
+    ON i.id = ii.invoice_id
+
+GROUP BY p.id, p.name, p.unit;
+
+-- =========================================
+-- ТЕСТОВЫЕ ДАННЫЕ
+-- =========================================
+
+INSERT INTO supplier(name, address, phone, email)
+VALUES
+('АвтоСнаб', 'Москва', '+79990000001', 'auto1@mail.ru'),
+('МоторДеталь', 'Казань', '+79990000002', 'auto2@mail.ru');
+
+INSERT INTO product(name, unit, article)
+VALUES
+('Масляный фильтр', 'шт', 'MF-001'),
+('Тормозные колодки', 'компл', 'TK-010'),
+('Свечи зажигания', 'шт', 'SZ-100');
+
+INSERT INTO supplier_product(supplier_id, product_id)
+VALUES
+(1,1),
+(1,2),
+(2,2),
+(2,3);
+
+-- =========================================
+-- ПРИХОДНАЯ НАКЛАДНАЯ
+-- =========================================
+
+INSERT INTO invoice
+(
+    supplier_id,
+    invoice_date,
+    invoice_type,
+    payment_due_date,
+    comment_text
+)
+VALUES
+(
+    1,
+    CURRENT_DATE,
+    'IN',
+    CURRENT_DATE + INTERVAL '2 month',
+    'Поставка товара'
+);
+
+-- =========================================
+-- ТОВАРЫ В НАКЛАДНОЙ
+-- total_sum обновится автоматически
+-- =========================================
+
+INSERT INTO invoice_item(invoice_id, product_id, quantity, price)
+VALUES
+(1, 1, 10, 500),
+(1, 2, 5, 2500);
+
+-- =========================================
+-- ЧАСТИЧНАЯ ОПЛАТА
+-- =========================================
+
+INSERT INTO payment(invoice_id, payment_date, amount)
+VALUES
+(1, CURRENT_DATE, 4000);
+
+-- =========================================
+-- ПРИМЕРЫ ЗАПРОСОВ
+-- =========================================
+
+-- Отчет по поставщикам
+-- SELECT * FROM vw_supplier_report;
+
+-- Остатки товаров
+-- SELECT * FROM vw_product_stock;
+
+-- Информация по оплатам
+-- SELECT * FROM vw_invoice_payments;
